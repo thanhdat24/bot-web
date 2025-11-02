@@ -16,11 +16,16 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "supersecret")  # tuỳ ý đ�
 PORT = int(os.environ.get("PORT", "5000"))
 RUN_SCHEDULER = os.environ.get("RUN_SCHEDULER", "1") == "1"  # chỉ 1 instance bật
 DEFAULT_CHAT_ID = os.environ.get("DEFAULT_CHAT_ID", "").strip()
+DEFAULT_TOKEN = os.environ.get("DEFAULT_TOKEN", "").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("Thiếu BOT_TOKEN (biến môi trường).")
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
+if DEFAULT_CHAT_ID and DEFAULT_TOKEN:
+    user_tokens[DEFAULT_CHAT_ID] = DEFAULT_TOKEN
+    print(f"✅ Nạp sẵn token môi trường cho chat_id {DEFAULT_CHAT_ID}")
+
 
 # ========= API nguồn dữ liệu =========
 LIST_API_URL_Dat = 'https://apidvc.cantho.gov.vn/pa/dossier/search?code=&spec=slice&page=0&size=20&sort=appointmentDate,asc&identity-number=&applicant-name=&identity-number-kha=&applicant-name-kha=&applicant-owner-name=&nation-id=&province-id=&district-id=&ward-id=&accepted-from=&accepted-to=&dossier-status=2,3,4,5,16,17,8,11,10,9&remove-status=0&filter-type=1&assignee-id=685fc98e49c5131dadc9758e&sender-id=&candidate-group-id=6836c073cfd0c57611ffb6b4&candidate-position-id=681acf200ba0691de878b438&candidate-group-parent-id=682d3c33c9e3cf7e4111847f&current-task-agency-type-id=68576ff99ca45c48a8e97d8d,0000591c4e1bd312a6f00004&bpm-name-id=&noidungyeucaugiaiquyet=&noidung=&taxCode=&resPerson=&extendTime=&applicant-organization=&filter-by-candidate-group=false&is-query-processing-dossier=false&approve-agencys-id=6836c073cfd0c57611ffb6b4,682d3c33c9e3cf7e4111847f&remind-id=&procedure-id=&vnpost-status-return-code=&paystatus=&process-id=&appointment-from=&appointment-to=&enable-approvaled-agency-tree-view=true'
@@ -34,59 +39,67 @@ user_tokens = {}  # {str(chat_id): "Bearer ...token..."}
 app = Flask(__name__)
 
 # --------- Helper: Chuẩn hoá chuỗi cookie -> "Bearer <token>" ----------
-def normalize_to_bearer_token(raw: str | bytes | None) -> str | None:
-    """Cố gắng trích token từ nhiều định dạng cookie/chuỗi và trả về 'Bearer xxx'."""
-    if raw is None:
+def normalize_to_bearer_token(raw):
+    """
+    Chuẩn hóa dữ liệu cookie/token thành dạng 'Bearer <token>'.
+
+    Hỗ trợ các trường hợp:
+    - Dữ liệu là bytes (từ file upload)
+    - Cookie dạng JSON (Chrome export)
+    - Cookie dạng text (nhiều dòng, có key=value)
+    - Token đã sẵn 'Bearer ' hoặc chỉ chuỗi thuần
+    """
+
+    if not raw:
         return None
+
+    # Nếu là bytes → decode UTF-8
     if isinstance(raw, bytes):
         try:
             raw = raw.decode('utf-8', errors='ignore')
         except Exception:
-            return None
-    s = str(raw).strip()
-    if not s:
+            raw = str(raw)
+
+    text = str(raw).strip()
+    if not text:
         return None
 
-    # 1) JSON: {"token":"..."}, {"access_token":"..."}
-    try:
-        obj = json.loads(s)
-        if isinstance(obj, dict):
-            tk = obj.get("token") or obj.get("access_token")
-            if tk:
-                tk = str(tk).strip()
-                return tk if tk.lower().startswith("bearer ") else f"Bearer {tk}"
-    except Exception:
-        pass
+    # Nếu người dùng dán nguyên token Bearer rồi
+    if text.lower().startswith("bearer "):
+        return text.strip()
 
-    # 2) Header: Authorization: Bearer xxx
-    m = re.search(r'Authorization\s*:\s*Bearer\s+([^\s]+)', s, flags=re.I)
-    if m:
-        return f"Bearer {m.group(1)}"
+    # Nếu nội dung có dấu "{" → có thể là JSON
+    if text.strip().startswith("{") and text.strip().endswith("}"):
+        try:
+            data = json.loads(text)
+            # Nếu có access_token
+            if "access_token" in data:
+                return f"Bearer {data['access_token'].strip()}"
+            # Nếu có token hay tương tự
+            for k in ["token", "authorization", "auth"]:
+                if k in data:
+                    return f"Bearer {str(data[k]).strip()}"
+        except Exception as e:
+            print("normalize_to_bearer_token: JSON parse error", e)
 
-    # 3) Bắt đầu bằng Bearer xxx
-    m = re.match(r'Bearer\s+([^\s]+)', s, flags=re.I)
-    if m:
-        return f"Bearer {m.group(1)}"
+    # Nếu cookie Chrome (nhiều dòng có name=value)
+    if "session" in text.lower() or "=" in text:
+        lines = text.splitlines()
+        for line in lines:
+            if "Bearer " in line:
+                return line.strip()
+            if "access_token" in line:
+                token_part = line.split("=", 1)[-1].strip()
+                return f"Bearer {token_part}"
+        # fallback: lấy phần dài nhất (thường là token)
+        parts = [p.strip() for p in text.replace("\r", "").replace("\n", " ").split(" ") if len(p.strip()) > 10]
+        longest = max(parts, key=len) if parts else ""
+        if longest:
+            return f"Bearer {longest}"
 
-    # 4) Cookie: ...; access_token=xxx; ... hoặc token=xxx
-    for part in re.split(r';\s*', s):
-        if '=' in part:
-            k, v = part.split('=', 1)
-            k = k.strip().lower()
-            v = v.strip()
-            if k in ('access_token', 'token', 'auth_token') and v:
-                return f"Bearer {v}"
+    # Mặc định: thêm tiền tố Bearer
+    return f"Bearer {text}"
 
-    # 5) JWT-like: xxx.yyy.zzz
-    m = re.search(r'([A-Za-z0-9\-\._]+)\.([A-Za-z0-9\-\._]+)\.([A-Za-z0-9\-\._]+)', s)
-    if m:
-        return f"Bearer {m.group(0)}"
-
-    # 6) Fallback: token dài có vẻ hợp lệ
-    if re.match(r'^[A-Za-z0-9\-\._=]{20,}$', s):
-        return f"Bearer {s}"
-
-    return None
 
 # --------- CORS preflight ----------
 @app.before_request
