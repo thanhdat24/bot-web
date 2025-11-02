@@ -21,19 +21,24 @@ DEFAULT_TOKEN = os.environ.get("DEFAULT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise RuntimeError("Thiếu BOT_TOKEN (biến môi trường).")
 
+# ========= Bộ nhớ token theo chat (KHAI BÁO TRƯỚC KHI DÙNG) =========
+# KHÔNG log token nhạy cảm ở production
+user_tokens = {}  # {str(chat_id): "Bearer ...token..."}
+
+# ========= Khởi tạo bot =========
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode=None)
+
+# ========= Nạp sẵn token từ biến môi trường (nếu có) =========
 if DEFAULT_CHAT_ID and DEFAULT_TOKEN:
-    user_tokens[DEFAULT_CHAT_ID] = DEFAULT_TOKEN
+    # đảm bảo có tiền tố "Bearer "
+    tok = DEFAULT_TOKEN if DEFAULT_TOKEN.lower().startswith("bearer ") else f"Bearer {DEFAULT_TOKEN}"
+    user_tokens[DEFAULT_CHAT_ID] = tok
     print(f"✅ Nạp sẵn token môi trường cho chat_id {DEFAULT_CHAT_ID}")
 
 
 # ========= API nguồn dữ liệu =========
 LIST_API_URL_Dat = 'https://apidvc.cantho.gov.vn/pa/dossier/search?code=&spec=slice&page=0&size=20&sort=appointmentDate,asc&identity-number=&applicant-name=&identity-number-kha=&applicant-name-kha=&applicant-owner-name=&nation-id=&province-id=&district-id=&ward-id=&accepted-from=&accepted-to=&dossier-status=2,3,4,5,16,17,8,11,10,9&remove-status=0&filter-type=1&assignee-id=685fc98e49c5131dadc9758e&sender-id=&candidate-group-id=6836c073cfd0c57611ffb6b4&candidate-position-id=681acf200ba0691de878b438&candidate-group-parent-id=682d3c33c9e3cf7e4111847f&current-task-agency-type-id=68576ff99ca45c48a8e97d8d,0000591c4e1bd312a6f00004&bpm-name-id=&noidungyeucaugiaiquyet=&noidung=&taxCode=&resPerson=&extendTime=&applicant-organization=&filter-by-candidate-group=false&is-query-processing-dossier=false&approve-agencys-id=6836c073cfd0c57611ffb6b4,682d3c33c9e3cf7e4111847f&remind-id=&procedure-id=&vnpost-status-return-code=&paystatus=&process-id=&appointment-from=&appointment-to=&enable-approvaled-agency-tree-view=true'
 LIST_API_URL_Sau = 'https://apidvc.cantho.gov.vn/pa/dossier/search?code=&spec=slice&page=0&size=20&sort=appointmentDate,asc&identity-number=&applicant-name=&identity-number-kha=&applicant-name-kha=&applicant-owner-name=&nation-id=&province-id=&district-id=&ward-id=&accepted-from=&accepted-to=&dossier-status=2,3,4,5,16,17&remove-status=0&filter-type=1&assignee-id=6867a8c8ee7546773abb419e&sender-id=&candidate-group-id=684ed450408f250a1932dd27&candidate-position-id=677dd2ff022b4b20dc5c787d&candidate-group-parent-id=682d3c33c9e3cf7e4111847f&current-task-agency-type-id=0000591c4e1bd312a6f00004,684bd0d7abb19b59e8bd2390&bpm-name-id=&noidungyeucaugiaiquyet=&noidung=&taxCode=&resPerson=&extendTime=&applicant-organization=&filter-by-candidate-group=false&is-query-processing-dossier=false&approve-agencys-id=684ed450408f250a1932dd27,682d3c33c9e3cf7e4111847f&remind-id=&procedure-id=&vnpost-status-return-code=&paystatus=&process-id=&appointment-from=&appointment-to=&enable-approvaled-agency-tree-view=true'
-
-# ========= Bộ nhớ token theo chat =========
-# KHÔNG log token nhạy cảm ở production
-user_tokens = {}  # {str(chat_id): "Bearer ...token..."}
 
 # ========= Flask app =========
 app = Flask(__name__)
