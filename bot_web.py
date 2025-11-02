@@ -15,6 +15,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()  # ví dụ https://your
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "supersecret")  # tuỳ ý đặt
 PORT = int(os.environ.get("PORT", "5000"))
 RUN_SCHEDULER = os.environ.get("RUN_SCHEDULER", "1") == "1"  # chỉ 1 instance bật
+DEFAULT_CHAT_ID = os.environ.get("DEFAULT_CHAT_ID", "").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("Thiếu BOT_TOKEN (biến môi trường).")
@@ -122,9 +123,9 @@ def index():
   <p class="hint">Bạn có thể dán trực tiếp cookie/token hoặc tải file (.txt/.json) chứa cookie/token.
   Server sẽ trích xuất token và lưu cho chat_id của bạn.</p>
 
-  <form class="box" action="/upload-cookie" method="POST" enctype="multipart/form-data">
-    <label>Telegram chat_id</label>
-    <input type="text" name="chat_id" placeholder="vd: 123456789" required>
+<form class="box" action="/upload-cookie" method="POST" enctype="multipart/form-data">
+    <!-- Chat ID được dùng mặc định từ server, không cần nhập -->
+
 
     <label>Dán cookie/token (tùy chọn)</label>
     <textarea name="cookie_text" rows="6" placeholder="Authorization: Bearer xxx ... hoặc access_token=xxx ... hoặc JSON {access_token: ...}"></textarea>
@@ -144,9 +145,10 @@ def index():
 @app.route("/upload-cookie", methods=["POST"])
 def upload_cookie():
     try:
-        chat_id = str((request.form.get("chat_id") or "").strip())
-        if not chat_id:
-            return "Thiếu chat_id", 400
+       chat_id = str((request.form.get("chat_id") or DEFAULT_CHAT_ID).strip())
+if not chat_id:
+    return "Thiếu chat_id (và DEFAULT_CHAT_ID chưa được cấu hình).", 400
+
 
         cookie_text = request.form.get("cookie_text")
         file_storage = request.files.get("cookie_file")
@@ -191,53 +193,13 @@ def upload_cookie():
         print("upload_cookie error:", e)
         return f"Lỗi xử lý: {e}", 500
 
-# --------- API nhận token/cookie từ client (JSON) ----------
-@app.route('/settoken', methods=['POST', 'OPTIONS'])
-def set_token_http():
-    if request.method == 'OPTIONS':
-        return '', 204
-    try:
-        data = request.json or {}
-    except Exception:
-        return make_response(jsonify({'status': 'error', 'message': 'Invalid JSON'}), 400)
-
-    chat_id = str(data.get('chat_id') or '')
-    user_token_raw = data.get('token')  # có thể là "Bearer xxx" hoặc cookie thô
-
-    if chat_id and user_token_raw:
-        bearer = normalize_to_bearer_token(user_token_raw)
-        if not bearer:
-            return make_response(jsonify({'status': 'error', 'message': 'Token/cookie không hợp lệ'}), 400)
-
-        user_tokens[chat_id] = bearer
-        # (Tuỳ chọn) lưu file local để debug
-        filename = f'userToken_{chat_id}.txt'
-        try:
-            if os.path.exists(filename):
-                os.remove(filename)
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(bearer)
-        except Exception:
-            pass
-
-        resp = jsonify({'status': 'success', 'message': 'Token saved'})
-    else:
-        resp = make_response(jsonify({'status': 'error', 'message': 'Missing chat_id or token'}), 400)
-
-    # CORS
-    if isinstance(resp, tuple):
-        resp = make_response(*resp)
-    resp.headers['Access-Control-Allow-Origin'] = '*'
-    resp.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-    resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return resp
 
 # ========= Handlers Telegram =========
 @bot.message_handler(commands=['start'])
 def start_message(message):
     chat_id = str(message.chat.id)
     bot.reply_to(message, (
-        "Chào! Bạn có thể gửi token qua /settoken hoặc web form tại /. "
+        "Chào! Hãy mở trang web của bot để gửi token: https://bot-web-osb4.onrender.com/"
         "Dùng /content để hiển thị bảng Dat & Sau. "
         "Bot sẽ gửi báo cáo mỗi 30 phút nếu được bật."
     ))
@@ -427,7 +389,8 @@ if __name__ == '__main__':
         # Chạy như web server (PaaS sẽ gọi cổng PORT)
         app.run(host='0.0.0.0', port=PORT)
     else:
-        # Dev local: không có WEBHOOK_URL thì dùng polling (vẫn mở Flask cho / và /settoken)
+       # Dev local: không có WEBHOOK_URL thì dùng polling (vẫn mở Flask cho / và /upload-cookie)
+
         from threading import Thread
         Thread(target=lambda: app.run(host='0.0.0.0', port=PORT), daemon=True).start()
         print("Running long polling (no WEBHOOK_URL).")
