@@ -145,53 +145,61 @@ def index():
 @app.route("/upload-cookie", methods=["POST"])
 def upload_cookie():
     try:
-       chat_id = str((request.form.get("chat_id") or DEFAULT_CHAT_ID).strip())
-if not chat_id:
-    return "Thiếu chat_id (và DEFAULT_CHAT_ID chưa được cấu hình).", 400
+        # Lấy chat_id từ form hoặc fallback sang DEFAULT_CHAT_ID
+        chat_id = str((request.form.get("chat_id") or DEFAULT_CHAT_ID).strip())
+        if not chat_id:
+            return "Thiếu chat_id (và DEFAULT_CHAT_ID chưa được cấu hình).", 400
 
-
+        # Lấy cookie từ text hoặc file
         cookie_text = request.form.get("cookie_text")
         file_storage = request.files.get("cookie_file")
 
         raw = None
         if file_storage and file_storage.filename:
-            raw = file_storage.read()  # bytes
+            # Đọc nội dung file tải lên
+            raw = file_storage.read()
         elif cookie_text:
             raw = cookie_text
 
         if not raw:
             return "Vui lòng dán cookie/token hoặc chọn file.", 400
 
+        # Chuẩn hóa cookie/token sang định dạng Bearer
         bearer = normalize_to_bearer_token(raw)
         if not bearer:
             return "Không trích xuất được token hợp lệ từ nội dung cung cấp.", 400
 
-        # Lưu vào bộ nhớ & (tuỳ chọn) file debug
+        # Lưu token vào bộ nhớ RAM
         user_tokens[chat_id] = bearer
-        filename = f'userToken_{chat_id}.txt'
+
+        # (Tuỳ chọn) Lưu file token local để debug
+        filename = f"userToken_{chat_id}.txt"
         try:
             if os.path.exists(filename):
                 os.remove(filename)
-            with open(filename, 'w', encoding='utf-8') as f:
+            with open(filename, "w", encoding="utf-8") as f:
                 f.write(bearer)
-        except Exception:
-            pass
+        except Exception as file_err:
+            print(f"[{chat_id}] Lỗi lưu file token: {file_err}")
 
+        # Phản hồi HTML xác nhận thành công
         return f"""
 <!doctype html>
 <html lang="vi">
 <meta charset="utf-8">
 <body style="font-family:sans-serif;max-width:720px;margin:24px auto;padding:0 12px">
-  <h3>Đã lưu token cho chat_id {chat_id}</h3>
-  <p>Token (ẩn bớt): {bearer[:20]}…</p>
-  <p><a href="/">Quay lại</a></p>
+  <h3>✅ Đã lưu token cho chat_id {chat_id}</h3>
+  <p>Token (ẩn bớt): {bearer[:25]}…</p>
+  <p>Bạn có thể quay lại Telegram và gõ /content để xem bảng Dat & Sau.</p>
+  <p><a href="/">⬅️ Quay lại trang chính</a></p>
 </body>
 </html>
         """, 200
 
     except Exception as e:
-        print("upload_cookie error:", e)
+        print("❌ upload_cookie error:", e)
         return f"Lỗi xử lý: {e}", 500
+
 
 
 # ========= Handlers Telegram =========
