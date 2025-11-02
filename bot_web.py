@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import requests
 import concurrent.futures
@@ -25,12 +26,68 @@ LIST_API_URL_Dat = 'https://apidvc.cantho.gov.vn/pa/dossier/search?code=&spec=sl
 LIST_API_URL_Sau = 'https://apidvc.cantho.gov.vn/pa/dossier/search?code=&spec=slice&page=0&size=20&sort=appointmentDate,asc&identity-number=&applicant-name=&identity-number-kha=&applicant-name-kha=&applicant-owner-name=&nation-id=&province-id=&district-id=&ward-id=&accepted-from=&accepted-to=&dossier-status=2,3,4,5,16,17&remove-status=0&filter-type=1&assignee-id=6867a8c8ee7546773abb419e&sender-id=&candidate-group-id=684ed450408f250a1932dd27&candidate-position-id=677dd2ff022b4b20dc5c787d&candidate-group-parent-id=682d3c33c9e3cf7e4111847f&current-task-agency-type-id=0000591c4e1bd312a6f00004,684bd0d7abb19b59e8bd2390&bpm-name-id=&noidungyeucaugiaiquyet=&noidung=&taxCode=&resPerson=&extendTime=&applicant-organization=&filter-by-candidate-group=false&is-query-processing-dossier=false&approve-agencys-id=684ed450408f250a1932dd27,682d3c33c9e3cf7e4111847f&remind-id=&procedure-id=&vnpost-status-return-code=&paystatus=&process-id=&appointment-from=&appointment-to=&enable-approvaled-agency-tree-view=true'
 
 # ========= Bộ nhớ token theo chat =========
-# KHÔNG lưu token nhạy cảm ra log/console ở bản thật
-user_tokens = {}  # {str(chat_id): token}
+# KHÔNG log token nhạy cảm ở production
+user_tokens = {}  # {str(chat_id): "Bearer ...token..."}
 
 # ========= Flask app =========
 app = Flask(__name__)
 
+# --------- Helper: Chuẩn hoá chuỗi cookie -> "Bearer <token>" ----------
+def normalize_to_bearer_token(raw: str | bytes | None) -> str | None:
+    """Cố gắng trích token từ nhiều định dạng cookie/chuỗi và trả về 'Bearer xxx'."""
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        try:
+            raw = raw.decode('utf-8', errors='ignore')
+        except Exception:
+            return None
+    s = str(raw).strip()
+    if not s:
+        return None
+
+    # 1) JSON: {"token":"..."}, {"access_token":"..."}
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            tk = obj.get("token") or obj.get("access_token")
+            if tk:
+                tk = str(tk).strip()
+                return tk if tk.lower().startswith("bearer ") else f"Bearer {tk}"
+    except Exception:
+        pass
+
+    # 2) Header: Authorization: Bearer xxx
+    m = re.search(r'Authorization\s*:\s*Bearer\s+([^\s]+)', s, flags=re.I)
+    if m:
+        return f"Bearer {m.group(1)}"
+
+    # 3) Bắt đầu bằng Bearer xxx
+    m = re.match(r'Bearer\s+([^\s]+)', s, flags=re.I)
+    if m:
+        return f"Bearer {m.group(1)}"
+
+    # 4) Cookie: ...; access_token=xxx; ... hoặc token=xxx
+    for part in re.split(r';\s*', s):
+        if '=' in part:
+            k, v = part.split('=', 1)
+            k = k.strip().lower()
+            v = v.strip()
+            if k in ('access_token', 'token', 'auth_token') and v:
+                return f"Bearer {v}"
+
+    # 5) JWT-like: xxx.yyy.zzz
+    m = re.search(r'([A-Za-z0-9\-\._]+)\.([A-Za-z0-9\-\._]+)\.([A-Za-z0-9\-\._]+)', s)
+    if m:
+        return f"Bearer {m.group(0)}"
+
+    # 6) Fallback: token dài có vẻ hợp lệ
+    if re.match(r'^[A-Za-z0-9\-\._=]{20,}$', s):
+        return f"Bearer {s}"
+
+    return None
+
+# --------- CORS preflight ----------
 @app.before_request
 def handle_preflight():
     if request.method == 'OPTIONS':
@@ -40,6 +97,101 @@ def handle_preflight():
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
         return response
 
+# --------- Trang chủ: form nhập/đăng file cookie ----------
+@app.route("/", methods=["GET"])
+def index():
+    # Trang HTML đơn giản: nhập chat_id + dán cookie hoặc upload file
+    return """
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Nạp cookie/token vào bot</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 12px; }
+  label { display:block; margin: 12px 0 6px; font-weight: 600; }
+  textarea, input[type=text] { width: 100%; padding: 8px; }
+  .hint { color:#666; font-size: 14px; }
+  .box { border:1px solid #ddd; padding:16px; border-radius:8px; }
+  button { padding: 10px 16px; }
+</style>
+</head>
+<body>
+  <h2>Nạp cookie/token vào bot</h2>
+  <p class="hint">Bạn có thể dán trực tiếp cookie/token hoặc tải file (.txt/.json) chứa cookie/token.
+  Server sẽ trích xuất token và lưu cho chat_id của bạn.</p>
+
+  <form class="box" action="/upload-cookie" method="POST" enctype="multipart/form-data">
+    <label>Telegram chat_id</label>
+    <input type="text" name="chat_id" placeholder="vd: 123456789" required>
+
+    <label>Dán cookie/token (tùy chọn)</label>
+    <textarea name="cookie_text" rows="6" placeholder="Authorization: Bearer xxx ... hoặc access_token=xxx ... hoặc JSON {access_token: ...}"></textarea>
+
+    <label>Hoặc tải file cookie (.txt/.json) (tùy chọn)</label>
+    <input type="file" name="cookie_file" accept=".txt,.json">
+
+    <p class="hint">Chỉ cần <b>một</b> trong hai: dán vào ô trên hoặc chọn file.</p>
+
+    <button type="submit">Gửi</button>
+  </form>
+</body>
+</html>
+    """, 200
+
+# --------- Upload cookie qua form (HTML) ----------
+@app.route("/upload-cookie", methods=["POST"])
+def upload_cookie():
+    try:
+        chat_id = str((request.form.get("chat_id") or "").strip())
+        if not chat_id:
+            return "Thiếu chat_id", 400
+
+        cookie_text = request.form.get("cookie_text")
+        file_storage = request.files.get("cookie_file")
+
+        raw = None
+        if file_storage and file_storage.filename:
+            raw = file_storage.read()  # bytes
+        elif cookie_text:
+            raw = cookie_text
+
+        if not raw:
+            return "Vui lòng dán cookie/token hoặc chọn file.", 400
+
+        bearer = normalize_to_bearer_token(raw)
+        if not bearer:
+            return "Không trích xuất được token hợp lệ từ nội dung cung cấp.", 400
+
+        # Lưu vào bộ nhớ & (tuỳ chọn) file debug
+        user_tokens[chat_id] = bearer
+        filename = f'userToken_{chat_id}.txt'
+        try:
+            if os.path.exists(filename):
+                os.remove(filename)
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(bearer)
+        except Exception:
+            pass
+
+        return f"""
+<!doctype html>
+<html lang="vi">
+<meta charset="utf-8">
+<body style="font-family:sans-serif;max-width:720px;margin:24px auto;padding:0 12px">
+  <h3>Đã lưu token cho chat_id {chat_id}</h3>
+  <p>Token (ẩn bớt): {bearer[:20]}…</p>
+  <p><a href="/">Quay lại</a></p>
+</body>
+</html>
+        """, 200
+
+    except Exception as e:
+        print("upload_cookie error:", e)
+        return f"Lỗi xử lý: {e}", 500
+
+# --------- API nhận token/cookie từ client (JSON) ----------
 @app.route('/settoken', methods=['POST', 'OPTIONS'])
 def set_token_http():
     if request.method == 'OPTIONS':
@@ -48,22 +200,30 @@ def set_token_http():
         data = request.json or {}
     except Exception:
         return make_response(jsonify({'status': 'error', 'message': 'Invalid JSON'}), 400)
+
     chat_id = str(data.get('chat_id') or '')
-    user_token = data.get('token')
-    if chat_id and user_token:
-        user_tokens[chat_id] = user_token
+    user_token_raw = data.get('token')  # có thể là "Bearer xxx" hoặc cookie thô
+
+    if chat_id and user_token_raw:
+        bearer = normalize_to_bearer_token(user_token_raw)
+        if not bearer:
+            return make_response(jsonify({'status': 'error', 'message': 'Token/cookie không hợp lệ'}), 400)
+
+        user_tokens[chat_id] = bearer
         # (Tuỳ chọn) lưu file local để debug
         filename = f'userToken_{chat_id}.txt'
         try:
             if os.path.exists(filename):
                 os.remove(filename)
             with open(filename, 'w', encoding='utf-8') as f:
-                f.write(user_token)
+                f.write(bearer)
         except Exception:
             pass
+
         resp = jsonify({'status': 'success', 'message': 'Token saved'})
     else:
         resp = make_response(jsonify({'status': 'error', 'message': 'Missing chat_id or token'}), 400)
+
     # CORS
     if isinstance(resp, tuple):
         resp = make_response(*resp)
@@ -77,14 +237,14 @@ def set_token_http():
 def start_message(message):
     chat_id = str(message.chat.id)
     bot.reply_to(message, (
-        "Chào! Extension sẽ gửi token qua HTTP (/settoken). "
+        "Chào! Bạn có thể gửi token qua /settoken hoặc web form tại /. "
         "Dùng /content để hiển thị bảng Dat & Sau. "
         "Bot sẽ gửi báo cáo mỗi 30 phút nếu được bật."
     ))
 
-def send_long_message(bot, chat_id, text, reply_to_message_id=None):
+def send_long_message(bot_obj, chat_id, text, reply_to_message_id=None):
     if len(text) <= 4096:
-        bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
+        bot_obj.send_message(chat_id, text, reply_to_message_id=reply_to_message_id)
         return
     lines = text.split('\n')
     current_part = ""
@@ -101,7 +261,7 @@ def send_long_message(bot, chat_id, text, reply_to_message_id=None):
         parts.append(current_part.strip())
     for i, part in enumerate(parts):
         reply_id = reply_to_message_id if i == 0 else None
-        bot.send_message(chat_id, part, reply_to_message_id=reply_id)
+        bot_obj.send_message(chat_id, part, reply_to_message_id=reply_id)
 
 def fetch_dossier_data(url, headers, chat_id):
     try:
@@ -125,7 +285,6 @@ def build_table(content_array, now, chat_id, prefix):
         noidungyeucau = item.get('applicant', {}).get('data', {}).get('noidungyeucaugiaiquyet', 'N/A')
         thuc_hien = item.get('accepter', {}).get('fullname', 'N/A')
         appointment_date_str = item.get('appointmentDate', 'N/A')
-        # Xử lý thời gian & nhãn
         label = ""
         formatted_time = appointment_date_str
         if appointment_date_str and appointment_date_str != 'N/A':
@@ -168,7 +327,7 @@ def send_periodic_report(chat_id):
         print(f"[{chat_id}] Không có token cho báo cáo định kỳ")
         return
     now = datetime.now()
-    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
+    headers = {'Authorization': token, 'Content-Type': 'application/json'}
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
         f1 = ex.submit(fetch_dossier_data, LIST_API_URL_Dat, headers, chat_id)
         f2 = ex.submit(fetch_dossier_data, LIST_API_URL_Sau, headers, chat_id)
@@ -200,10 +359,10 @@ def content_table(message):
     chat_id = str(message.chat.id)
     token = user_tokens.get(chat_id)
     if not token:
-        bot.reply_to(message, "❌ Chưa có token. Chạy extension để gửi.")
+        bot.reply_to(message, "❌ Chưa có token. Gửi tại trang / hoặc /settoken.")
         return
     now = datetime.now()
-    headers = {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'}
+    headers = {'Authorization': token, 'Content-Type': 'application/json'}
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
         f1 = ex.submit(fetch_dossier_data, LIST_API_URL_Dat, headers, chat_id)
         f2 = ex.submit(fetch_dossier_data, LIST_API_URL_Sau, headers, chat_id)
@@ -251,7 +410,6 @@ def start_scheduler_if_needed():
 
 def setup_webhook_if_needed():
     if WEBHOOK_URL:
-        # đảm bảo URL là endpoint /telegram (trùng route ở trên)
         full_url = WEBHOOK_URL.rstrip('/')
         try:
             bot.remove_webhook()
@@ -269,7 +427,7 @@ if __name__ == '__main__':
         # Chạy như web server (PaaS sẽ gọi cổng PORT)
         app.run(host='0.0.0.0', port=PORT)
     else:
-        # Dev local: không có WEBHOOK_URL thì dùng polling (vẫn mở Flask cho /settoken)
+        # Dev local: không có WEBHOOK_URL thì dùng polling (vẫn mở Flask cho / và /settoken)
         from threading import Thread
         Thread(target=lambda: app.run(host='0.0.0.0', port=PORT), daemon=True).start()
         print("Running long polling (no WEBHOOK_URL).")
